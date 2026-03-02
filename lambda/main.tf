@@ -24,3 +24,33 @@ resource "aws_lambda_function" "test_lambda" {
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
   runtime = "python3.12"
 }
+
+# S3 Bucket for testing CICD
+resource "random_id" "bucket_suffix" {
+  byte_length = 4
+}
+
+resource "aws_s3_bucket" "test_bucket" {
+  bucket = "terraform-cicd-test-${random_id.bucket_suffix.hex}"
+  
+  tags = {
+    Name        = "Terraform CICD Test Bucket"
+    Environment = "Test"
+    ManagedBy   = "Terraform"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "test_bucket_versioning" {
+  bucket = aws_s3_bucket.test_bucket.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+output "bucket_name" {
+  value = aws_s3_bucket.test_bucket.id
+}
+
+output "lambda_function_name" {
+  value = aws_lambda_function.test_lambda.function_name
+}
