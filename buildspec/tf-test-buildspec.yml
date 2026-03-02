@@ -1,16 +1,12 @@
-# Terraform Test
+# Debug - check directory structure
 version: 0.2
 phases:
   pre_build:
     commands:
-      - TF_DIR=$(find . -name "lambda.tf" -exec dirname {} \; | head -1)
-      - echo "Found terraform dir at $TF_DIR"
-      - cd "$TF_DIR"
-      - terraform init
-      - terraform validate
+      - pwd
+      - ls -la
+      - find . -type f | head -30
 
   build:
     commands:
-      - TF_DIR=$(find . -name "lambda.tf" -exec dirname {} \; | head -1)
-      - cd "$TF_DIR"
-      - terraform test || echo "No tests found, skipping"
+      - echo "done"
