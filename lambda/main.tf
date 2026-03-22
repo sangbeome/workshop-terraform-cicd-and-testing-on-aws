@@ -8,12 +8,14 @@ terraform {
 
 provider "aws" { region = "us-east-1" }
 
+locals {
+  prefix = "cicd-v2"
+}
+
 # ============================================================
 # Data Sources
 # ============================================================
-data "aws_vpc" "default" {
-  default = true
-}
+data "aws_vpc" "default" { default = true }
 
 data "aws_subnets" "default" {
   filter {
@@ -25,91 +27,72 @@ data "aws_subnets" "default" {
 # ============================================================
 # Security Groups
 # ============================================================
-
-# Lambda가 RDS에 접근할 때 사용하는 SG
 resource "aws_security_group" "lambda_sg" {
-  name        = "cicd-lambda-sg"
+  name        = "${local.prefix}-lambda-sg"
   description = "Security group for Lambda functions"
   vpc_id      = data.aws_vpc.default.id
-
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
-  tags = { Name = "cicd-lambda-sg", ManagedBy = "Terraform" }
+  tags = { Name = "${local.prefix}-lambda-sg", ManagedBy = "Terraform" }
 }
 
-# RDS 인스턴스용 SG
-# BUG: MySQL은 3306 포트를 사용하는데 5432(PostgreSQL)로 열어놓음
-#      terraform apply는 성공하지만 Lambda → RDS 연결 시 timeout 발생
 resource "aws_security_group" "rds_sg" {
-  name        = "cicd-rds-sg"
+  name        = "${local.prefix}-rds-sg"
   description = "Security group for RDS MySQL"
   vpc_id      = data.aws_vpc.default.id
-
   ingress {
     description     = "MySQL access from Lambda"
-    from_port       = 5432    # BUG: PostgreSQL 포트 — MySQL은 3306이어야 함
-    to_port         = 5432    # BUG: PostgreSQL 포트 — MySQL은 3306이어야 함
+    from_port       = 5432
+    to_port         = 5432
     protocol        = "tcp"
     security_groups = [aws_security_group.lambda_sg.id]
   }
-
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
-  tags = { Name = "cicd-rds-mysql-sg", ManagedBy = "Terraform" }
+  tags = { Name = "${local.prefix}-rds-mysql-sg", ManagedBy = "Terraform" }
 }
 
 # ============================================================
-# RDS Subnet Group
+# RDS
 # ============================================================
 resource "aws_db_subnet_group" "main" {
-  name       = "cicd-test-db-subnet"
+  name       = "${local.prefix}-db-subnet"
   subnet_ids = slice(data.aws_subnets.default.ids, 0, 2)
-
-  tags = { Name = "cicd-test-db-subnet", ManagedBy = "Terraform" }
+  tags       = { Name = "${local.prefix}-db-subnet", ManagedBy = "Terraform" }
 }
 
-# ============================================================
-# RDS MySQL Instance
-# ============================================================
 resource "random_password" "db_password" {
   length  = 16
   special = false
 }
 
 resource "aws_db_instance" "mysql" {
-  identifier     = "cicd-test-mysql"
-  engine         = "mysql"
-  engine_version = "8.0"
-  instance_class = "db.t3.micro"
-
-  allocated_storage = 20
-  storage_type      = "gp3"
-
-  db_name  = "orders"
-  username = "admin"
-  password = random_password.db_password.result
-
+  identifier             = "${local.prefix}-mysql"
+  engine                 = "mysql"
+  engine_version         = "8.0"
+  instance_class         = "db.t3.micro"
+  allocated_storage      = 20
+  storage_type           = "gp3"
+  db_name                = "orders"
+  username               = "admin"
+  password               = random_password.db_password.result
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds_sg.id]
-
-  skip_final_snapshot = true
-  publicly_accessible = false
-
-  tags = { Name = "cicd-test-mysql", Environment = "Test", ManagedBy = "Terraform" }
+  skip_final_snapshot    = true
+  publicly_accessible    = false
+  tags                   = { Name = "${local.prefix}-mysql", Environment = "Test", ManagedBy = "Terraform" }
 }
 
 # ============================================================
-# Lambda Function (RDS에 연결하는 함수)
+# Lambda
 # ============================================================
 data "archive_file" "lambda_zip" {
   type        = "zip"
@@ -135,12 +118,11 @@ data "archive_file" "lambda_zip" {
 }
 
 resource "aws_iam_role" "lambda_role" {
-  name = "cicd-db-connector-role"
+  name = "${local.prefix}-lambda-role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
+      Action = "sts:AssumeRole", Effect = "Allow"
       Principal = { Service = "lambda.amazonaws.com" }
     }]
   })
@@ -158,19 +140,17 @@ resource "aws_iam_role_policy_attachment" "lambda_vpc" {
 
 resource "aws_lambda_function" "db_connector" {
   filename         = data.archive_file.lambda_zip.output_path
-  function_name    = "cicd-db-connector"
+  function_name    = "${local.prefix}-db-connector"
   role             = aws_iam_role.lambda_role.arn
   handler          = "lambda_function.lambda_handler"
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
   runtime          = "python3.12"
   timeout          = 30
   memory_size      = 256
-
   vpc_config {
     subnet_ids         = slice(data.aws_subnets.default.ids, 0, 2)
     security_group_ids = [aws_security_group.lambda_sg.id]
   }
-
   environment {
     variables = {
       DB_HOST = aws_db_instance.mysql.address
