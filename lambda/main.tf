@@ -135,7 +135,7 @@ data "archive_file" "lambda_zip" {
 }
 
 resource "aws_iam_role" "lambda_role" {
-  name = "cicd-test-lambda-role"
+  name = "cicd-db-connector-role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -191,6 +191,6 @@ output "rds_endpoint" {
 output "lambda_function_name" {
   value = aws_lambda_function.db_connector.function_name
 }
-output "rds_sg_ingress_port" {
-  value = "5432 (BUG: should be 3306 for MySQL)"
+output "rds_sg_id" {
+  value = aws_security_group.rds_sg.id
 }
