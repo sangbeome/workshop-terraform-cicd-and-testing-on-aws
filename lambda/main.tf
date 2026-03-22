@@ -1,15 +1,15 @@
 terraform {
   required_providers {
-    aws      = { source = "hashicorp/aws", version = "~> 6.0" }
-    random   = { source = "hashicorp/random", version = "~> 3.0" }
-    archive  = { source = "hashicorp/archive", version = "~> 2.0" }
+    aws = { source = "hashicorp/aws", version = "~> 6.0" }
+    random = { source = "hashicorp/random", version = "~> 3.0" }
+    archive = { source = "hashicorp/archive", version = "~> 2.0" }
   }
 }
 
 provider "aws" { region = "us-east-1" }
 
 # ============================================================
-# 1. Lambda Function (기존)
+# 1. Lambda Function
 # ============================================================
 data "archive_file" "lambda_zip" {
   type        = "zip"
@@ -30,6 +30,12 @@ resource "aws_iam_role" "lambda_role" {
       Principal = { Service = "lambda.amazonaws.com" }
     }]
   })
+
+  # BUG 1: Circular dependency - role의 tag에서 lambda function name 참조
+  #         하지만 lambda가 이 role을 참조함 → 순환 참조
+  tags = {
+    ManagedFunction = aws_lambda_function.test_lambda.function_name
+  }
 }
 
 resource "aws_iam_role_policy_attachment" "lambda_basic" {
@@ -99,10 +105,19 @@ resource "aws_dynamodb_table" "orders" {
     type = "S"
   }
 
+  # BUG 2: GSI에서 사용하는 attribute가 정의되지 않음
+  #         "status" attribute를 GSI에서 range_key로 쓰지만 attribute 블록에 선언 안 함
   global_secondary_index {
     name            = "CustomerIndex"
     hash_key        = "customerId"
     range_key       = "timestamp"
+    projection_type = "ALL"
+  }
+
+  global_secondary_index {
+    name            = "StatusIndex"
+    hash_key        = "orderId"
+    range_key       = "status"        # "status" attribute 미선언 → apply 시 에러
     projection_type = "ALL"
   }
 
@@ -128,7 +143,6 @@ resource "aws_sqs_queue" "order_queue" {
   })
 }
 
-# Lambda SQS trigger
 resource "aws_lambda_event_source_mapping" "sqs_trigger" {
   event_source_arn = aws_sqs_queue.order_queue.arn
   function_name    = aws_lambda_function.test_lambda.arn
@@ -136,7 +150,7 @@ resource "aws_lambda_event_source_mapping" "sqs_trigger" {
 }
 
 # ============================================================
-# 5. SNS Topic + Subscription
+# 5. SNS Topic
 # ============================================================
 resource "aws_sns_topic" "notifications" {
   name = "cicd-test-notifications"
@@ -156,55 +170,47 @@ resource "aws_cloudwatch_metric_alarm" "lambda_errors" {
   threshold           = 5
   alarm_description   = "Lambda error rate too high"
   alarm_actions       = [aws_sns_topic.notifications.arn]
-
   dimensions = {
     FunctionName = aws_lambda_function.test_lambda.function_name
   }
 }
 
 # ============================================================
-# 7. [BUG] Second Lambda - 잘못된 runtime 지정
-#    python3.99는 존재하지 않는 runtime → 리소스 생성 실패
+# 7. Event processing Lambda with external module dependency
 # ============================================================
-data "archive_file" "processor_zip" {
-  type        = "zip"
-  output_path = "${path.module}/processor.zip"
-  source {
-    content  = "import json\ndef handler(event, context):\n    return {'statusCode': 200, 'body': 'processed'}"
-    filename = "processor.py"
-  }
-}
+# BUG 3: 존재하지 않는 모듈 버전 참조
+#         실제 모듈은 있지만 99.0.0 버전은 없음 → init 단계에서 실패
+module "event_processor_label" {
+  source  = "cloudposse/label/null"
+  version = "99.0.0"
 
-resource "aws_lambda_function" "order_processor" {
-  filename         = data.archive_file.processor_zip.output_path
-  function_name    = "cicd-order-processor"
-  role             = aws_iam_role.lambda_role.arn
-  handler          = "processor.handler"
-  source_code_hash = data.archive_file.processor_zip.output_base64sha256
-  runtime          = "python3.99"  # BUG: 존재하지 않는 runtime
-  timeout          = 60
-  memory_size      = 512
+  namespace   = "cicd"
+  environment = "test"
+  name        = "event-processor"
 }
 
 # ============================================================
-# 8. [BUG] IAM Policy - 존재하지 않는 managed policy 참조
+# 8. IAM Policy with interpolation dependency issue
 # ============================================================
-resource "aws_iam_role_policy_attachment" "lambda_dynamodb" {
-  role       = aws_iam_role.lambda_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess_v99"  # BUG: 존재하지 않는 정책
+# BUG 4: for_each에서 toset()에 known-after-apply 값 사용
+#         random_id는 plan 시점에 값을 모르므로 for_each에 사용 불가
+resource "random_id" "policy_ids" {
+  count       = 3
+  byte_length = 4
 }
 
-# ============================================================
-# 9. [BUG] S3 Bucket Notification - 존재하지 않는 Lambda 참조
-# ============================================================
-resource "aws_s3_bucket_notification" "bucket_notification" {
-  bucket = aws_s3_bucket.test_bucket.id
+resource "aws_iam_policy" "dynamic_policies" {
+  for_each = toset(random_id.policy_ids[*].hex)
 
-  lambda_function {
-    lambda_function_arn = "arn:aws:lambda:us-east-1:937743225658:function:non-existent-function"  # BUG: 존재하지 않는 함수
-    events              = ["s3:ObjectCreated:*"]
-    filter_prefix       = "uploads/"
-  }
+  name = "cicd-dynamic-policy-${each.value}"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["logs:CreateLogGroup"]
+      Resource = "*"
+    }]
+  })
 }
 
 # ============================================================
